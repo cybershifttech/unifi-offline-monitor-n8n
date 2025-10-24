@@ -83,3 +83,9 @@ Verify: Check your Data Table to ensure it's populated with device hostnames.
 Activate Workflow: Save the workflow and toggle the "Active" switch in the top-left corner to ON.
 
 Your UniFi monitoring is now live! ✨
+
+⚠️ Disclaimer:
+This workflow is provided “as is,” without any warranty or guarantee of performance. Use at your own discretion.
+
+💡 Use Case:
+Perfect for MSPs, network admins, and Unifi enthusiasts who manage remote sites and need reliable offline alerting beyond the standard Unifi notifications.
