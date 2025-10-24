@@ -1,0 +1,759 @@
+{
+  "name": "Unifi Offline Alerts - Template",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://api.ui.com/v1/hosts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "REPLACE WITH API KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        384
+      ],
+      "name": "HTTP Request - UniFi Hosts",
+      "id": "c10a947c-046d-4edc-bb86-148f56056df4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten UniFi hosts response\nconst resp = (items[0]?.json?.data ?? []);\nreturn resp.map(entry => ({ json: {\n  ipAddress: entry.ipAddress || 'Unknown',\n  hostname: entry.reportedState?.hostname || entry.hostname || 'Unknown',\n  state: entry.reportedState?.state || entry.state || 'Unknown'\n}}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        384
+      ],
+      "name": "Pull list of hosts",
+      "id": "10abf9ed-eb12-48b8-8fe3-6131380555b5"
+    },
+    {
+      "parameters": {
+        "jsCode": "const excludedIPs = [];\nconst filtered = items.filter(i => !excludedIPs.includes(i.json.ipAddress));\nreturn filtered;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        384
+      ],
+      "name": "Parse data from sites (filter)",
+      "id": "8efc2fd7-c44f-4d7f-9332-c5d453994b48"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "hostname",
+              "keyValue": "={{ $json.hostname }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        832,
+        384
+      ],
+      "name": "Read unifi_alerts",
+      "id": "985e1ff7-0adc-4550-b3e2-613a48d61943",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Get *all* current device data from the 'Parse' node.\n// We use the $() syntax, which is more reliable than $node.\nconst allCurrentDevices = $('Parse data from sites (filter)').all();\n\n// 'items' is the input from 'Read unifi_alerts'\nreturn items.map((dbItem, index) => {\n  \n  // 2. Get the *CURRENT* device data by matching the index\n  // We must get .json from the $() output\n  const currentDevice = allCurrentDevices[index].json;\n\n  // 3. Get the *DATABASE* data\n  const existing = dbItem.json;\n\n  // --- STATE CHECKS ---\n  const currentState = (currentDevice.state || \"\").toLowerCase();\n  const isDisconnected = [\"disconnected\", \"offline\"].includes(currentState);\n  const isConnected = [\"connected\", \"online\"].includes(currentState);\n  \n  // 'existing.state' is the *database* state (if it exists)\n  const previouslyOffline = [\"disconnected\", \"offline\"].includes((existing.state || \"\").toLowerCase());\n\n  // --- DB READ FAILURE/NEW DEVICE CHECK ---\n  // If 'existing.alert_start' is missing, it's a new device or a failed read.\n  if (typeof existing.alert_start === 'undefined') {\n    if (isDisconnected) {\n      // It's offline, and we have no DB record. Treat as new alert.\n      return {\n        json: { ...currentDevice, shouldAlert: true, isRecovery: false, alert_start: new Date().toISOString(), last_alert_sent: new Date().toISOString(), original_alert_start: null, recovery_time: null }\n      };\n    }\n    // It's online, and we have no DB record. Do nothing, but add to DB.\n    return {\n      json: { ...currentDevice, shouldAlert: false, isRecovery: false, alert_start: null, last_alert_sent: null, original_alert_start: null, recovery_time: null }\n    };\n  }\n\n  // --- REGULAR LOGIC (DB Read Succeeded) ---\n  const now = new Date();\n  const fourHours = 4 * 60 * 60 * 1000;\n  let shouldAlert = false;\n  let isRecovery = false;\n\n  // Handle [null] array values\n  let alertStart = (Array.isArray(existing.alert_start) && existing.alert_start[0] === null) ? null : existing.alert_start;\n  let lastAlertSent = (Array.isArray(existing.last_alert_sent) && existing.last_alert_sent[0] === null) ? null : existing.last_alert_sent;\n  \n  let originalAlertStart = null;\n  let recoveryTime = null;\n\n  if (isDisconnected) {\n    if (previouslyOffline) {\n      // Still offline. Check cooldown.\n      const lastAlert = lastAlertSent ? new Date(lastAlertSent) : null;\n      if (!lastAlert || (now - lastAlert) > fourHours) {\n        shouldAlert = true;\n        lastAlertSent = now.toISOString();\n      }\n      alertStart = alertStart || now.toISOString(); // Preserve original start\n    } else {\n      // Was online, now offline. New outage.\n      shouldAlert = true;\n      alertStart = now.toISOString();\n      lastAlertSent = now.toISOString();\n    }\n  } else if (isConnected && previouslyOffline) {\n    // Was offline, now online. Recovery.\n    shouldAlert = true;\n    isRecovery = true;\n    originalAlertStart = alertStart || now.toISOString();\n    recoveryTime = now.toISOString();\n    alertStart = null; // Re-arm\n    lastAlertSent = null; // Re-arm\n  }\n  \n  // Pass through the *current* state and all our new alert fields\n  return {\n    json: { \n      ...currentDevice, \n      shouldAlert, \n      isRecovery, \n      alert_start: alertStart, \n      last_alert_sent: lastAlertSent, \n      original_alert_start: originalAlertStart, \n      recovery_time: recoveryTime \n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        384
+      ],
+      "name": "Check Alert Window",
+      "id": "5e8fbfc9-ccef-44e4-b71d-bc18e0e5a97b"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.shouldAlert }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "50da510a-610d-45d8-845d-985e86cbaf76"
+            },
+            {
+              "leftValue": "={{ $json.isRecovery }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "ebdcffa2-05e4-44e7-8f77-6bacb0a4cf33"
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1264,
+        384
+      ],
+      "name": "If Should Alert",
+      "id": "fa96449d-2f79-4a61-9bbf-5d526486a51f"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isRecovery }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "77784752-b0ff-4636-9bc7-710d7d844feb"
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1536,
+        256
+      ],
+      "name": "If Recovery",
+      "id": "b2756e36-f697-4f91-b987-ae2654158292"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "hostname",
+              "keyValue": "={{ $json.hostname }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "hostname": "={{ $json.hostname }}",
+            "state": "={{ $json.state }}",
+            "alert_start": "={{ $json.alert_start }}",
+            "last_alert_sent": "={{ $json.last_alert_sent }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "hostname",
+              "displayName": "hostname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "alert_start",
+              "displayName": "alert_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_alert_sent",
+              "displayName": "last_alert_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1744,
+        336
+      ],
+      "name": "Upsert unifi_alerts",
+      "id": "1dc09ff6-7d74-4ef5-b843-7481a15e11e3"
+    },
+    {
+      "parameters": {
+        "fromEmail": "YOUR EMAIL",
+        "toEmail": "YOUR EMAIL",
+        "subject": "=[Unifi Alert] {{ $json.hostname }} Still Offline",
+        "html": "=<div style=\"font-family:Segoe UI,Arial,sans-serif;background-color:#0f1115;color:#e6e8ee;padding:24px;\">\n  <div style=\"max-width:720px;margin:0 auto;background-color:#1a1f2e;border:1px solid #2e3a4f;border-radius:10px;\">\n    <div style=\"background-color:#035aa8;color:#fff;padding:14px 18px;font-weight:700;font-size:18px;\">\n      🚨 {{ $json.hostname }} Offline Alert\n    </div>\n    <div style=\"padding:18px;\">\n      <p>The UniFi device below has been detected as <strong style='color:#ff5c5c;'>OFFLINE</strong>.</p>\n      <table style=\"width:100%;border-collapse:collapse;margin-top:8px;\">\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;width:180px;\">Hostname</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.hostname }}</td></tr>\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;\">State</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.state }}</td></tr>\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;\">Alert Start</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.alert_start }}</td></tr>\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;\">Last Alert Sent</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.last_alert_sent }}</td></tr>\n      </table>\n      <p style=\"margin-top:12px;font-size:13px;color:#949698;\">Alerts are limited to one every 4 hours while the device remains offline.</p>\n      <p><a href=\"https://network.unifi.ui.com/\" style=\"display:inline-block;background-color:#478fcc;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;\">Open UniFi Portal</a></p>\n    </div>\n    <div style=\"background-color:#0e141f;color:#949698;padding:10px 18px;font-size:12px;\">\n      YOUR COMPANY NAME\n    </div>\n  </div>\n</div>\n",
+        "options": {},
+        "continueOnFail": true
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1952,
+        336
+      ],
+      "name": "Send Offline Email",
+      "id": "9f70b46e-636f-4da9-9077-82d38e62578d",
+      "webhookId": "b8356750-8c02-46c2-952d-97c12bb6629d"
+    },
+    {
+      "parameters": {
+        "fromEmail": "YOUR EMAIL",
+        "toEmail": "YOUR EMAIL",
+        "subject": "=[Unifi Recovery] {{ $json.hostname }} Back Online",
+        "html": "=<div style=\"font-family:Segoe UI,Arial,sans-serif;background-color:#0f1115;color:#e6e8ee;padding:24px;\">\n  <div style=\"max-width:720px;margin:0 auto;background-color:#1a1f2e;border:1px solid #2e3a4f;border-radius:10px;\">\n    <div style=\"background-color:#035aa8;color:#fff;padding:14px 18px;font-weight:700;font-size:18px;\">\n      ✅ {{ $json.hostname }} Recovery Alert\n    </div>\n    <div style=\"padding:18px;\">\n      <p>The UniFi device below has <strong style='color:#34d399;'>RECOVERED</strong> and is now online.</p>\n      <table style=\"width:100%;border-collapse:collapse;margin-top:8px;\">\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;width:180px;\">Hostname</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.hostname }}</td></tr>\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;\">Went Offline</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.original_alert_start }}</td></tr>\n        <tr><td style=\"border:1px solid #478fcc;padding:8px;\">Recovered At</td><td style=\"border:1px solid #478fcc;padding:8px;\">{{ $json.recovery_time }}</td></tr>\n      </table>\n      <p><a href=\"https://network.unifi.ui.com/\" style=\"display:inline-block;background-color:#478fcc;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;\">Open UniFi Portal</a></p>\n    </div>\n    <div style=\"background-color:#0e141f;color:#949698;padding:10px 18px;font-size:12px;\">\n      YOUR COMPANY NAME\n    </div>\n  </div>\n</div>",
+        "options": {},
+        "continueOnFail": true
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1744,
+        144
+      ],
+      "name": "Send Recovery Email",
+      "id": "4b5f8bcb-605d-4106-9bac-35b08b6a91f8",
+      "webhookId": "9b77b6d7-4619-4a6f-a11c-10ec40490548"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "hostname",
+              "keyValue": "={{ $('If Recovery').item.json.hostname }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "hostname": "={{ $('If Recovery').item.json.hostname }}",
+            "state": "={{ $('If Recovery').item.json.state }}",
+            "alert_start": "={{ $('If Recovery').item.json.alert_start }}",
+            "last_alert_sent": "={{ $('If Recovery').item.json.last_alert_sent }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "hostname",
+              "displayName": "hostname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "alert_start",
+              "displayName": "alert_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_alert_sent",
+              "displayName": "last_alert_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1952,
+        144
+      ],
+      "name": "Update unifi_alerts (Recovery)",
+      "id": "daf13129-4ceb-4733-9142-a2753a2f1c99"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "hostname",
+              "keyValue": "={{ $json.hostname }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "hostname": "={{ $json.hostname }}",
+            "state": "={{ $json.state }}",
+            "alert_start": "={{ $json.alert_start }}",
+            "last_alert_sent": "={{ $json.last_alert_sent }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "hostname",
+              "displayName": "hostname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "alert_start",
+              "displayName": "alert_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_alert_sent",
+              "displayName": "last_alert_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1536,
+        528
+      ],
+      "name": "Update unifi_alerts (No Alert)",
+      "id": "c9301673-8780-41bd-96ac-103a6f20a6c6"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        80
+      ],
+      "name": "Manual Trigger (1hr disabled)",
+      "id": "bad513da-1034-40cf-971a-3811dfc5d1bf"
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = (items[0]?.json?.data ?? []);\nreturn resp.map(entry => ({ json: {\n  hostname: entry.reportedState?.hostname || entry.hostname || 'Unknown',\n  state: entry.reportedState?.state || entry.state || 'Unknown',\n  alert_start: null,\n  last_alert_sent: null\n}}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        80
+      ],
+      "name": "Parse Hosts",
+      "id": "7774dc64-8334-45fe-aa27-a71e92469d1a"
+    },
+    {
+      "parameters": {
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "hostname": "={{ $json.hostname }}",
+            "state": "={{ $json.state }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "hostname",
+              "displayName": "hostname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "alert_start",
+              "displayName": "alert_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "last_alert_sent",
+              "displayName": "last_alert_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "optimizeBulk": false
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        560,
+        80
+      ],
+      "name": "Insert Initial Rows",
+      "id": "c6c43998-d474-40f4-a788-153d4cfddc6f"
+    },
+    {
+      "parameters": {
+        "url": "https://api.ui.com/v1/hosts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "REPLACE WITH API KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        80
+      ],
+      "name": "HTTP Request - UniFi Hosts1",
+      "id": "0ac1d93a-5302-4b3f-a6c6-75e15b650bbe"
+    },
+    {
+      "parameters": {
+        "content": "ONLY RUN TO PREFILL THE unifi_alerts DB Table after creation",
+        "height": 272,
+        "width": 768
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "98499b34-66aa-46f4-8a03-68df16774b84",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        384
+      ],
+      "name": "Schedule Trigger (every 1 min)",
+      "id": "50879019-4446-46e5-9bbf-527009b8ca80"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request - UniFi Hosts": {
+      "main": [
+        [
+          {
+            "node": "Pull list of hosts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pull list of hosts": {
+      "main": [
+        [
+          {
+            "node": "Parse data from sites (filter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse data from sites (filter)": {
+      "main": [
+        [
+          {
+            "node": "Read unifi_alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read unifi_alerts": {
+      "main": [
+        [
+          {
+            "node": "Check Alert Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Alert Window": {
+      "main": [
+        [
+          {
+            "node": "If Should Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Should Alert": {
+      "main": [
+        [
+          {
+            "node": "If Recovery",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update unifi_alerts (No Alert)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Recovery": {
+      "main": [
+        [
+          {
+            "node": "Send Recovery Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Upsert unifi_alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert unifi_alerts": {
+      "main": [
+        [
+          {
+            "node": "Send Offline Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Recovery Email": {
+      "main": [
+        [
+          {
+            "node": "Update unifi_alerts (Recovery)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger (1hr disabled)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - UniFi Hosts1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Hosts": {
+      "main": [
+        [
+          {
+            "node": "Insert Initial Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - UniFi Hosts1": {
+      "main": [
+        [
+          {
+            "node": "Parse Hosts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger (every 1 min)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - UniFi Hosts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c3a5e85d-a2da-4e1d-9eb1-2842441d4981",
+  "id": "zhUYZjBfOBWVmRWl",
+  "tags": []
+}
